@@ -10,10 +10,6 @@ services:
       - key: JWT_SECRET
         generateValue: true
       - key: DB_PATH
-        value: /data/pullup.db
+        value: ./db/pullup.db
       - key: AREA_BOUNDS
         value: "37.46,-84.50,37.86,-83.80"
-    disk:
-      name: pullup-data
-      mountPath: /data
-      sizeGB: 1
