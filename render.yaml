@@ -13,6 +13,8 @@ services:
         value: /data/pullup.db
       - key: AREA_BOUNDS
         value: "37.46,-84.50,37.86,-83.80"
+      - key: STRIPE_SECRET_KEY
+        sync: false
     disk:
       name: pullup-data
       mountPath: /data
