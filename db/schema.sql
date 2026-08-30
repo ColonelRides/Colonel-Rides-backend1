@@ -2,13 +2,17 @@
 -- Money is stored in cents (INTEGER) to avoid floating-point fare bugs.
 
 CREATE TABLE IF NOT EXISTS users (
-  id            TEXT PRIMARY KEY,
-  role          TEXT NOT NULL CHECK (role IN ('rider','driver','admin')),
-  name          TEXT NOT NULL,
-  email         TEXT NOT NULL UNIQUE,
-  phone         TEXT NOT NULL,
-  password_hash TEXT NOT NULL,
-  created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+  id                       TEXT PRIMARY KEY,
+  role                     TEXT NOT NULL CHECK (role IN ('rider','driver','admin')),
+  name                     TEXT NOT NULL,
+  email                    TEXT NOT NULL UNIQUE,
+  phone                    TEXT NOT NULL,
+  password_hash            TEXT NOT NULL,
+  stripe_customer_id       TEXT,
+  stripe_payment_method_id TEXT,
+  card_brand               TEXT,
+  card_last4               TEXT,
+  created_at               TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE TABLE IF NOT EXISTS driver_profiles (
@@ -53,6 +57,8 @@ CREATE TABLE IF NOT EXISTS rides (
   fare_cents      INTEGER NOT NULL,
   driver_take_cents INTEGER,
   payment_method  TEXT NOT NULL DEFAULT 'card' CHECK (payment_method IN ('card','cash')),
+  stripe_payment_intent_id TEXT,
+  payment_status  TEXT NOT NULL DEFAULT 'unpaid' CHECK (payment_status IN ('unpaid','paid','failed')),
   pin             TEXT NOT NULL,
   status          TEXT NOT NULL DEFAULT 'requested'
                   CHECK (status IN ('requested','accepted','arriving','arrived','onTrip','complete','cancelled')),
