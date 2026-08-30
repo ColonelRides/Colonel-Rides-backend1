@@ -16,4 +16,22 @@ db.pragma("foreign_keys = ON");
 const schema = fs.readFileSync(path.join(__dirname, "schema.sql"), "utf8");
 db.exec(schema);
 
+// `CREATE TABLE IF NOT EXISTS` only helps brand-new databases — it does
+// nothing for a table that already exists with older columns, like the
+// one already running on a persistent disk. This adds any columns from
+// later schema versions that are missing, without touching existing data.
+function ensureColumn(table, column, definition){
+  const existing = db.prepare(`PRAGMA table_info(${table})`).all().map(c => c.name);
+  if(!existing.includes(column)){
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+    console.log(`Migrated: added ${table}.${column}`);
+  }
+}
+ensureColumn("users", "stripe_customer_id", "TEXT");
+ensureColumn("users", "stripe_payment_method_id", "TEXT");
+ensureColumn("users", "card_brand", "TEXT");
+ensureColumn("users", "card_last4", "TEXT");
+ensureColumn("rides", "stripe_payment_intent_id", "TEXT");
+ensureColumn("rides", "payment_status", "TEXT NOT NULL DEFAULT 'unpaid'");
+
 module.exports = db;
