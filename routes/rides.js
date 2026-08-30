@@ -2,6 +2,7 @@ const express = require("express");
 const { v4: uuid } = require("uuid");
 const db = require("../db");
 const { requireAuth, requireRole } = require("../middleware/auth");
+const { stripe } = require("./payments");
 
 const router = express.Router();
 
@@ -33,6 +34,7 @@ function shapeRide(row) {
     fareCents: row.fare_cents,
     driverTakeCents: row.driver_take_cents,
     paymentMethod: row.payment_method,
+    paymentStatus: row.payment_status,
     pin: row.pin, // only strip this before sending to the driver — see note below
     status: row.status,
     scheduledFor: row.scheduled_for,
@@ -134,7 +136,7 @@ const NEXT_STATUS = {
   onTrip: ["complete"],
 };
 
-router.patch("/:id/status", requireAuth, (req, res) => {
+router.patch("/:id/status", requireAuth, async (req, res) => {
   const row = db.prepare("SELECT * FROM rides WHERE id = ?").get(req.params.id);
   if (!row) return res.status(404).json({ error: "Ride not found." });
 
@@ -161,6 +163,43 @@ router.patch("/:id/status", requireAuth, (req, res) => {
     const driverTake = Math.round(row.fare_cents * 0.78);
     db.prepare("UPDATE rides SET status=?, completed_at=datetime('now'), driver_take_cents=? WHERE id=?")
       .run(status, driverTake, row.id);
+
+    // Charge the rider now that the trip is actually done. This never
+    // blocks the ride from completing — a driver shouldn't get stuck
+    // because of a declined card. A failed charge is recorded on the
+    // ride for the admin dashboard to chase down, not silently lost.
+    if (row.payment_method === "card") {
+      const rider = db.prepare("SELECT * FROM users WHERE id = ?").get(row.rider_id);
+      if (!stripe) {
+        db.prepare("UPDATE rides SET payment_status='failed' WHERE id=?").run(row.id);
+        logEvent(row.id, "payment:failed", { reason: "Stripe not configured on server" });
+      } else if (!rider.stripe_customer_id || !rider.stripe_payment_method_id) {
+        db.prepare("UPDATE rides SET payment_status='failed' WHERE id=?").run(row.id);
+        logEvent(row.id, "payment:failed", { reason: "Rider has no saved card" });
+      } else {
+        try {
+          const intent = await stripe.paymentIntents.create({
+            amount: row.fare_cents,
+            currency: "usd",
+            customer: rider.stripe_customer_id,
+            payment_method: rider.stripe_payment_method_id,
+            off_session: true,
+            confirm: true,
+            metadata: { ride_id: row.id },
+          });
+          db.prepare("UPDATE rides SET payment_status='paid', stripe_payment_intent_id=? WHERE id=?")
+            .run(intent.id, row.id);
+          logEvent(row.id, "payment:paid", { stripePaymentIntentId: intent.id });
+        } catch (e) {
+          db.prepare("UPDATE rides SET payment_status='failed' WHERE id=?").run(row.id);
+          logEvent(row.id, "payment:failed", { reason: e.message });
+          console.warn("Stripe charge failed for ride", row.id, ":", e.message);
+        }
+      }
+    } else {
+      // cash — nothing for Stripe to do; stays 'unpaid' as a reminder
+      // this one was collected outside the app.
+    }
   } else if (status === "cancelled") {
     db.prepare("UPDATE rides SET status=?, cancelled_at=datetime('now'), cancel_reason=? WHERE id=?")
       .run(status, reason || null, row.id);
