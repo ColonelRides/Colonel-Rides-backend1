@@ -73,14 +73,6 @@ router.post("/apply", requireAuth, requireRole("driver"), (req, res) => {
     payout_last4: p.last4, payout_brand: p.brand || null, ssn_last4: b.ssn4,
   });
 
-  // Demo-only auto-approve so the flow is testable without a real
-  // background-check provider wired in. Delete this block once Checkr
-  // (or similar) is calling PATCH /api/admin/drivers/:id/approve for you.
-  setTimeout(() => {
-    db.prepare("UPDATE driver_profiles SET status='approved', updated_at=datetime('now') WHERE user_id=? AND status='pending'")
-      .run(req.user.id);
-  }, 3000);
-
   const row = db.prepare("SELECT * FROM driver_profiles WHERE user_id = ?").get(req.user.id);
   const user = db.prepare("SELECT name FROM users WHERE id = ?").get(req.user.id);
   res.status(201).json({ profile: shapeProfile(row, user.name) });
