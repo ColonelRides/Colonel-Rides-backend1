@@ -32,6 +32,7 @@ function shapeRide(row) {
     distanceMiles: row.distance_miles,
     durationMin: row.duration_min,
     fareCents: row.fare_cents,
+    tipCents: row.tip_cents,
     driverTakeCents: row.driver_take_cents,
     paymentMethod: row.payment_method,
     paymentStatus: row.payment_status,
@@ -53,7 +54,7 @@ function shapeForRole(row, role, selfId) {
   return shaped;
 }
 
-router.post("/", requireAuth, requireRole("rider"), (req, res) => {
+router.post("/", requireAuth, requireRole("rider"), async (req, res) => {
   const b = req.body || {};
   const { pickup, dest, tier, distanceMiles, durationMin, fareCents, paymentMethod, scheduledFor } = b;
 
@@ -64,6 +65,40 @@ router.post("/", requireAuth, requireRole("rider"), (req, res) => {
     return res.status(400).json({ error: "Pickup is outside the service area." });
   }
 
+  const isCash = paymentMethod === "cash";
+  const fareCentsRounded = Math.round(fareCents);
+
+  // Charge BEFORE the ride is created — if the card can't be charged,
+  // the rider should find out immediately, not end up with a ride a
+  // driver already accepted only for payment to fail afterward.
+  let paymentIntentId = null;
+  let paymentStatus = "unpaid";
+  if (!isCash) {
+    if (!stripe) {
+      return res.status(503).json({ error: "Payments aren't configured on this server yet." });
+    }
+    const rider = db.prepare("SELECT * FROM users WHERE id = ?").get(req.user.id);
+    if (!rider.stripe_customer_id || !rider.stripe_payment_method_id) {
+      return res.status(400).json({ error: "Add a card before requesting a ride." });
+    }
+    try {
+      const intent = await stripe.paymentIntents.create({
+        amount: fareCentsRounded,
+        currency: "usd",
+        customer: rider.stripe_customer_id,
+        payment_method: rider.stripe_payment_method_id,
+        off_session: true,
+        confirm: true,
+        metadata: { rider_id: req.user.id },
+      });
+      paymentIntentId = intent.id;
+      paymentStatus = "paid";
+    } catch (e) {
+      console.warn("Stripe charge failed at request time:", e.message);
+      return res.status(402).json({ error: "Your card was declined: " + e.message });
+    }
+  }
+
   const ride = {
     id: uuid(),
     rider_id: req.user.id,
@@ -72,25 +107,26 @@ router.post("/", requireAuth, requireRole("rider"), (req, res) => {
     dest_lat: dest.lat, dest_lng: dest.lng, dest_label: dest.label || "Destination",
     distance_miles: distanceMiles || 0,
     duration_min: durationMin || 0,
-    fare_cents: Math.round(fareCents),
-    payment_method: paymentMethod === "cash" ? "cash" : "card",
+    fare_cents: fareCentsRounded,
+    payment_method: isCash ? "cash" : "card",
+    payment_status: paymentStatus,
+    stripe_payment_intent_id: paymentIntentId,
     pin: String(Math.floor(1000 + Math.random() * 9000)),
     scheduled_for: scheduledFor || null,
   };
   db.prepare(
     `INSERT INTO rides (id, rider_id, tier, pickup_lat, pickup_lng, pickup_label, dest_lat, dest_lng, dest_label,
-                         distance_miles, duration_min, fare_cents, payment_method, pin, scheduled_for)
+                         distance_miles, duration_min, fare_cents, payment_method, payment_status,
+                         stripe_payment_intent_id, pin, scheduled_for)
      VALUES (@id, @rider_id, @tier, @pickup_lat, @pickup_lng, @pickup_label, @dest_lat, @dest_lng, @dest_label,
-             @distance_miles, @duration_min, @fare_cents, @payment_method, @pin, @scheduled_for)`
+             @distance_miles, @duration_min, @fare_cents, @payment_method, @payment_status,
+             @stripe_payment_intent_id, @pin, @scheduled_for)`
   ).run(ride);
-  logEvent(ride.id, "requested", { tier, fareCents: ride.fare_cents });
+  logEvent(ride.id, "requested", { tier, fareCents: ride.fare_cents, paymentStatus });
+  if (paymentIntentId) logEvent(ride.id, "payment:charged", { stripePaymentIntentId: paymentIntentId });
 
   const row = db.prepare("SELECT * FROM rides WHERE id = ?").get(ride.id);
 
-  // Tell every online driver in the service area a ride is up for grabs.
-  // A real dispatch would rank by distance/ETA instead of broadcasting
-  // to everyone; fine for a four-town launch, worth revisiting once
-  // you have more than a handful of drivers online at once.
   req.app.get("io").to("drivers:online").emit("ride:new", shapeRide(row));
 
   res.status(201).json({ ride: shapeForRole(row, "rider", req.user.id) });
@@ -163,46 +199,24 @@ router.patch("/:id/status", requireAuth, async (req, res) => {
     const driverTake = Math.round(row.fare_cents * 0.78);
     db.prepare("UPDATE rides SET status=?, completed_at=datetime('now'), driver_take_cents=? WHERE id=?")
       .run(status, driverTake, row.id);
-
-    // Charge the rider now that the trip is actually done. This never
-    // blocks the ride from completing — a driver shouldn't get stuck
-    // because of a declined card. A failed charge is recorded on the
-    // ride for the admin dashboard to chase down, not silently lost.
-    if (row.payment_method === "card") {
-      const rider = db.prepare("SELECT * FROM users WHERE id = ?").get(row.rider_id);
-      if (!stripe) {
-        db.prepare("UPDATE rides SET payment_status='failed' WHERE id=?").run(row.id);
-        logEvent(row.id, "payment:failed", { reason: "Stripe not configured on server" });
-      } else if (!rider.stripe_customer_id || !rider.stripe_payment_method_id) {
-        db.prepare("UPDATE rides SET payment_status='failed' WHERE id=?").run(row.id);
-        logEvent(row.id, "payment:failed", { reason: "Rider has no saved card" });
-      } else {
-        try {
-          const intent = await stripe.paymentIntents.create({
-            amount: row.fare_cents,
-            currency: "usd",
-            customer: rider.stripe_customer_id,
-            payment_method: rider.stripe_payment_method_id,
-            off_session: true,
-            confirm: true,
-            metadata: { ride_id: row.id },
-          });
-          db.prepare("UPDATE rides SET payment_status='paid', stripe_payment_intent_id=? WHERE id=?")
-            .run(intent.id, row.id);
-          logEvent(row.id, "payment:paid", { stripePaymentIntentId: intent.id });
-        } catch (e) {
-          db.prepare("UPDATE rides SET payment_status='failed' WHERE id=?").run(row.id);
-          logEvent(row.id, "payment:failed", { reason: e.message });
-          console.warn("Stripe charge failed for ride", row.id, ":", e.message);
-        }
-      }
-    } else {
-      // cash — nothing for Stripe to do; stays 'unpaid' as a reminder
-      // this one was collected outside the app.
-    }
+    // Payment already happened at request time — nothing to charge here.
   } else if (status === "cancelled") {
     db.prepare("UPDATE rides SET status=?, cancelled_at=datetime('now'), cancel_reason=? WHERE id=?")
       .run(status, reason || null, row.id);
+
+    // Already charged at request time — a cancellation now needs a
+    // real refund, not just a status change, or the rider's been
+    // charged for a ride that never happened.
+    if (row.payment_status === "paid" && row.stripe_payment_intent_id && stripe) {
+      try {
+        await stripe.refunds.create({ payment_intent: row.stripe_payment_intent_id });
+        db.prepare("UPDATE rides SET payment_status='refunded' WHERE id=?").run(row.id);
+        logEvent(row.id, "payment:refunded", { stripePaymentIntentId: row.stripe_payment_intent_id });
+      } catch (e) {
+        console.warn("Refund failed for ride", row.id, ":", e.message);
+        logEvent(row.id, "payment:refund_failed", { reason: e.message });
+      }
+    }
   } else {
     db.prepare("UPDATE rides SET status=? WHERE id=?").run(status, row.id);
   }
@@ -217,6 +231,51 @@ router.patch("/:id/status", requireAuth, async (req, res) => {
   const updated = db.prepare("SELECT * FROM rides WHERE id = ?").get(row.id);
   req.app.get("io").to("ride:" + row.id).emit("ride:updated", shapeRide(updated));
   res.json({ ride: shapeForRole(updated, req.user.role, req.user.id) });
+});
+
+// Tips are their own charge — a separate PaymentIntent, added after the
+// ride's own fare is already settled, using the same saved card.
+router.post("/:id/tip", requireAuth, requireRole("rider"), async (req, res) => {
+  const row = db.prepare("SELECT * FROM rides WHERE id = ?").get(req.params.id);
+  if (!row) return res.status(404).json({ error: "Ride not found." });
+  if (row.rider_id !== req.user.id) return res.status(403).json({ error: "Not your ride." });
+  if (row.status !== "complete") return res.status(409).json({ error: "Can only tip a completed ride." });
+  if (row.tip_cents) return res.status(409).json({ error: "This ride already has a tip." });
+
+  const { tipCents } = req.body || {};
+  const amount = Math.round(Number(tipCents));
+  if (!amount || amount < 50) return res.status(400).json({ error: "Tip must be at least $0.50." });
+
+  if (row.payment_method === "cash") {
+    db.prepare("UPDATE rides SET tip_cents=? WHERE id=?").run(amount, row.id);
+    logEvent(row.id, "tip:cash", { amount });
+    return res.json({ ok: true, tipCents: amount, charged: false });
+  }
+
+  if (!stripe) return res.status(503).json({ error: "Payments aren't configured on this server yet." });
+  const rider = db.prepare("SELECT * FROM users WHERE id = ?").get(req.user.id);
+  if (!rider.stripe_customer_id || !rider.stripe_payment_method_id) {
+    return res.status(400).json({ error: "No card on file to charge the tip to." });
+  }
+
+  try {
+    const intent = await stripe.paymentIntents.create({
+      amount,
+      currency: "usd",
+      customer: rider.stripe_customer_id,
+      payment_method: rider.stripe_payment_method_id,
+      off_session: true,
+      confirm: true,
+      metadata: { ride_id: row.id, kind: "tip" },
+    });
+    db.prepare("UPDATE rides SET tip_cents=?, stripe_tip_payment_intent_id=? WHERE id=?")
+      .run(amount, intent.id, row.id);
+    logEvent(row.id, "tip:charged", { amount, stripePaymentIntentId: intent.id });
+    res.json({ ok: true, tipCents: amount, charged: true });
+  } catch (e) {
+    console.warn("Tip charge failed for ride", row.id, ":", e.message);
+    res.status(402).json({ error: "Couldn't charge the tip: " + e.message });
+  }
 });
 
 router.post("/:id/dispute", requireAuth, (req, res) => {
