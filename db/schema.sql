@@ -58,7 +58,9 @@ CREATE TABLE IF NOT EXISTS rides (
   driver_take_cents INTEGER,
   payment_method  TEXT NOT NULL DEFAULT 'card' CHECK (payment_method IN ('card','cash')),
   stripe_payment_intent_id TEXT,
-  payment_status  TEXT NOT NULL DEFAULT 'unpaid' CHECK (payment_status IN ('unpaid','paid','failed')),
+  payment_status  TEXT NOT NULL DEFAULT 'unpaid' CHECK (payment_status IN ('unpaid','paid','failed','refunded')),
+  tip_cents       INTEGER NOT NULL DEFAULT 0,
+  stripe_tip_payment_intent_id TEXT,
   pin             TEXT NOT NULL,
   status          TEXT NOT NULL DEFAULT 'requested'
                   CHECK (status IN ('requested','accepted','arriving','arrived','onTrip','complete','cancelled')),
