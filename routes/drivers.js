@@ -22,6 +22,10 @@ function shapeProfile(row, name) {
       seats: row.vehicle_seats,
     },
     payout: { method: row.payout_method, last4: row.payout_last4, brand: row.payout_brand },
+    stripeConnect: {
+      accountId: row.stripe_connect_account_id,
+      status: row.stripe_connect_status,
+    },
     rating: row.rating,
     tripsCount: row.trips_count,
     isOnline: !!row.is_online,
@@ -129,3 +133,4 @@ router.post("/online", requireAuth, requireRole("driver"), (req, res) => {
 });
 
 module.exports = router;
+      
