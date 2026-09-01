@@ -9,7 +9,8 @@
     "dev": "node server.js",
     "start": "node server.js",
     "db:reset": "node db/reset.js",
-    "seed:admin": "node db/seed-admin.js"
+    "seed:admin": "node db/seed-admin.js",
+    "test": "node --test test/promo.test.js && FRONTEND_HTML_PATH=${FRONTEND_HTML_PATH:-../zipp-frontend/index.html} node --test test/fare.test.js"
   },
   "dependencies": {
     "better-sqlite3": "^11.3.0",
@@ -18,8 +19,10 @@
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
     "jsonwebtoken": "^9.0.2",
+    "nodemailer": "^6.9.14",
     "socket.io": "^4.7.5",
     "stripe": "^22.5.0",
-    "uuid": "^9.0.1"
+    "uuid": "^9.0.1",
+    "web-push": "^3.6.7"
   }
 }
