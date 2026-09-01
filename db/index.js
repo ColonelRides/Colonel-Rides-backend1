@@ -31,10 +31,28 @@ ensureColumn("users", "stripe_customer_id", "TEXT");
 ensureColumn("users", "stripe_payment_method_id", "TEXT");
 ensureColumn("users", "card_brand", "TEXT");
 ensureColumn("users", "card_last4", "TEXT");
+ensureColumn("users", "email_verified", "INTEGER NOT NULL DEFAULT 0");
+ensureColumn("users", "email_verify_token", "TEXT");
+ensureColumn("users", "email_verify_expires", "TEXT");
+ensureColumn("users", "reset_token", "TEXT");
+ensureColumn("users", "reset_token_expires", "TEXT");
+// Not declared UNIQUE here — SQLite can't add a UNIQUE column via ALTER
+// TABLE. Uniqueness for referral codes is enforced in application code
+// at generation time (routes/auth.js) instead.
+ensureColumn("users", "referral_code", "TEXT");
+ensureColumn("users", "referred_by", "TEXT");
+ensureColumn("users", "credit_cents", "INTEGER NOT NULL DEFAULT 0");
+ensureColumn("driver_profiles", "stripe_connect_account_id", "TEXT");
+ensureColumn("driver_profiles", "stripe_connect_status", "TEXT NOT NULL DEFAULT 'not_started'");
 ensureColumn("rides", "stripe_payment_intent_id", "TEXT");
 ensureColumn("rides", "payment_status", "TEXT NOT NULL DEFAULT 'unpaid'");
 ensureColumn("rides", "tip_cents", "INTEGER NOT NULL DEFAULT 0");
 ensureColumn("rides", "stripe_tip_payment_intent_id", "TEXT");
+ensureColumn("rides", "stripe_transfer_id", "TEXT");
+ensureColumn("rides", "driver_pay_status", "TEXT NOT NULL DEFAULT 'unpaid'");
+ensureColumn("rides", "promo_code", "TEXT");
+ensureColumn("rides", "discount_cents", "INTEGER NOT NULL DEFAULT 0");
+ensureColumn("rides", "credit_applied_cents", "INTEGER NOT NULL DEFAULT 0");
 
 // SQLite can't ALTER a CHECK constraint directly — allowing a new status
 // value ('refunded') requires recreating the table. This only runs if
