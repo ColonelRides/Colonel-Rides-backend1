@@ -1,4 +1,4 @@
-  const express = require("express");
+const express = require("express");
 const db = require("../db");
 const { requireAuth, requireRole } = require("../middleware/auth");
 
@@ -54,6 +54,46 @@ router.patch("/drivers/:userId/reject", (req, res) => {
   res.json({ ok: true });
 });
 
+// Permanently removes a driver's account. Deliberately more cautious than
+// deleting a ride: ride history is detached (driver_id set to NULL, so
+// past rides stay on record as "Unassigned" rather than vanishing) rather
+// than deleted outright, and the delete is refused — not silently
+// cascaded — if it would destroy dispute records, since those are the
+// kind of history you don't want an accidental tap to erase.
+router.delete("/drivers/:userId", (req, res) => {
+  const { userId } = req.params;
+  const user = db.prepare("SELECT * FROM users WHERE id = ? AND role = 'driver'").get(userId);
+  if (!user) return res.status(404).json({ error: "No driver found with that id." });
+
+  const disputeCount = db.prepare(
+    "SELECT COUNT(*) n FROM disputes WHERE raised_by = ?"
+  ).get(userId).n;
+  if (disputeCount > 0) {
+    return res.status(409).json({
+      error: "This driver has raised or been party to a dispute, so their account can't be permanently deleted. Reject or deactivate them instead to keep that history intact.",
+    });
+  }
+
+  const tx = db.transaction(() => {
+    // Keep the ride records — just detach the driver reference so old
+    // trips don't disappear from history, they just show as unassigned.
+    db.prepare("UPDATE rides SET driver_id = NULL WHERE driver_id = ?").run(userId);
+    db.prepare("DELETE FROM promo_redemptions WHERE user_id = ?").run(userId);
+    db.prepare("DELETE FROM referral_credits WHERE user_id = ?").run(userId);
+    db.prepare("UPDATE users SET referred_by = NULL WHERE referred_by = ?").run(userId);
+    // driver_profiles and push_subscriptions cascade automatically.
+    db.prepare("DELETE FROM users WHERE id = ?").run(userId);
+  });
+
+  try {
+    tx();
+    res.json({ ok: true });
+  } catch (e) {
+    console.error("Driver delete failed:", e.message);
+    res.status(409).json({ error: "Couldn't delete this driver — they still have linked records elsewhere." });
+  }
+});
+
 router.get("/rides/live", (req, res) => {
   const rows = db.prepare(
     `SELECT r.*, ru.name AS rider_name, du.name AS driver_name
@@ -75,6 +115,33 @@ router.get("/rides", (req, res) => {
      ORDER BY r.requested_at DESC LIMIT 200`
   ).all();
   res.json({ rides: rows });
+});
+
+// Permanently removes a ride and everything tied specifically to it
+// (disputes, promo redemptions, referral credits, event log — ride_events
+// cascades automatically, the rest don't so they're cleaned up here).
+// Meant for clearing out stale test/demo rides, not as an undo for a real
+// completed trip — this does not touch Stripe or reverse any charge.
+router.delete("/rides/:id", (req, res) => {
+  const { id } = req.params;
+  const ride = db.prepare("SELECT id FROM rides WHERE id = ?").get(id);
+  if (!ride) return res.status(404).json({ error: "No ride found with that id." });
+
+  const tx = db.transaction(() => {
+    db.prepare("DELETE FROM disputes WHERE ride_id = ?").run(id);
+    db.prepare("DELETE FROM promo_redemptions WHERE ride_id = ?").run(id);
+    db.prepare("DELETE FROM referral_credits WHERE ride_id = ?").run(id);
+    // ride_events cascades automatically via ON DELETE CASCADE.
+    db.prepare("DELETE FROM rides WHERE id = ?").run(id);
+  });
+
+  try {
+    tx();
+    res.json({ ok: true });
+  } catch (e) {
+    console.error("Ride delete failed:", e.message);
+    res.status(409).json({ error: "Couldn't delete this ride — it still has linked records elsewhere." });
+  }
 });
 
 router.get("/disputes", (req, res) => {
@@ -129,3 +196,4 @@ router.patch("/promo-codes/:code/deactivate", (req, res) => {
 });
 
 module.exports = router;
+    
