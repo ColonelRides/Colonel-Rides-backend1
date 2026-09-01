@@ -1,4 +1,4 @@
-const express = require("express");
+  const express = require("express");
 const db = require("../db");
 const { requireAuth, requireRole } = require("../middleware/auth");
 
@@ -97,6 +97,34 @@ router.patch("/disputes/:id/resolve", (req, res) => {
     "UPDATE disputes SET status='resolved', resolution_note=?, refund_cents=?, resolved_at=datetime('now') WHERE id=?"
   ).run(note || null, refundCents ?? null, req.params.id);
   if (info.changes === 0) return res.status(404).json({ error: "Dispute not found." });
+  res.json({ ok: true });
+});
+
+router.get("/promo-codes", (req, res) => {
+  const rows = db.prepare("SELECT * FROM promo_codes ORDER BY created_at DESC").all();
+  res.json({ promoCodes: rows });
+});
+
+router.post("/promo-codes", (req, res) => {
+  const { code, discountType, discountValue, maxUses, perUserLimit, expiresAt } = req.body || {};
+  if (!code || !["percent", "flat"].includes(discountType) || !discountValue) {
+    return res.status(400).json({ error: "code, discountType ('percent'|'flat'), and discountValue are required." });
+  }
+  const normalized = String(code).toUpperCase().trim();
+  const existing = db.prepare("SELECT code FROM promo_codes WHERE code = ?").get(normalized);
+  if (existing) return res.status(409).json({ error: "That code already exists." });
+
+  db.prepare(
+    `INSERT INTO promo_codes (code, discount_type, discount_value, max_uses, per_user_limit, expires_at)
+     VALUES (?, ?, ?, ?, ?, ?)`
+  ).run(normalized, discountType, Math.round(discountValue), maxUses ?? null, perUserLimit ?? 1, expiresAt || null);
+
+  res.status(201).json({ ok: true, code: normalized });
+});
+
+router.patch("/promo-codes/:code/deactivate", (req, res) => {
+  const info = db.prepare("UPDATE promo_codes SET active=0 WHERE code=?").run(req.params.code.toUpperCase());
+  if (info.changes === 0) return res.status(404).json({ error: "Promo code not found." });
   res.json({ ok: true });
 });
 
