@@ -5,8 +5,18 @@ const { v4: uuid } = require("uuid");
 const db = require("../db");
 const { signToken, requireAuth } = require("../middleware/auth");
 const { sendMail } = require("../lib/mailer");
+const { createRateLimiter } = require("../lib/rateLimit");
 
 const router = express.Router();
+
+// Generous enough that a real person mistyping a password a few times
+// never notices, tight enough that scripting thousands of guesses
+// against one account (or spraying one password across many emails)
+// actually gets slowed down.
+const loginLimiter = createRateLimiter({ windowMs: 15 * 60 * 1000, max: 10, message: "Too many login attempts. Try again in a few minutes." });
+const signupLimiter = createRateLimiter({ windowMs: 60 * 60 * 1000, max: 8, message: "Too many accounts created from this connection. Try again later." });
+const forgotLimiter = createRateLimiter({ windowMs: 60 * 60 * 1000, max: 5, message: "Too many reset requests. Try again later." });
+const resetLimiter = createRateLimiter({ windowMs: 15 * 60 * 1000, max: 10, message: "Too many attempts. Try again in a few minutes." });
 
 const FRONTEND_URL = (process.env.FRONTEND_URL || "").replace(/\/$/, "");
 if (!FRONTEND_URL) {
@@ -44,7 +54,7 @@ function randomToken() {
   return crypto.randomBytes(32).toString("hex");
 }
 
-router.post("/signup", (req, res) => {
+router.post("/signup", signupLimiter, (req, res) => {
   const { name, email, phone, password, role, referralCode } = req.body || {};
   if (!name || !email || !phone || !password) {
     return res.status(400).json({ error: "name, email, phone, and password are all required." });
@@ -95,7 +105,7 @@ router.post("/signup", (req, res) => {
   res.status(201).json({ token: signToken(row), user: publicUser(row) });
 });
 
-router.post("/login", (req, res) => {
+router.post("/login", loginLimiter, (req, res) => {
   const { email, password } = req.body || {};
   if (!email || !password) return res.status(400).json({ error: "email and password are required." });
 
@@ -165,7 +175,7 @@ router.post("/verify/confirm", (req, res) => {
 // Always responds 200 regardless of whether the email is on file — this
 // is standard practice so the endpoint can't be used to check which
 // emails have an account.
-router.post("/password/forgot", (req, res) => {
+router.post("/password/forgot", forgotLimiter, (req, res) => {
   const { email } = req.body || {};
   if (!email) return res.status(400).json({ error: "email is required." });
 
@@ -187,7 +197,7 @@ router.post("/password/forgot", (req, res) => {
   res.json({ ok: true, message: "If that email has an account, a reset link is on its way." });
 });
 
-router.post("/password/reset", (req, res) => {
+router.post("/password/reset", resetLimiter, (req, res) => {
   const { token, newPassword } = req.body || {};
   if (!token || !newPassword) return res.status(400).json({ error: "token and newPassword are required." });
   if (String(newPassword).length < 8) return res.status(400).json({ error: "Password must be at least 8 characters." });
@@ -206,4 +216,3 @@ router.post("/password/reset", (req, res) => {
 });
 
 module.exports = router;
-  
